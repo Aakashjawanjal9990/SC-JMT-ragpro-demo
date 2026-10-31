@@ -1,8 +1,6 @@
 name: CD - Deploy API and BFF to Cloud Run
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       confirm_deploy:
@@ -24,7 +22,7 @@ jobs:
     name: Require repository CI
     if: >-
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || inputs.confirm_deploy == 'yes')
+      inputs.confirm_deploy == 'yes'
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
@@ -34,7 +32,7 @@ jobs:
     needs: ci
     if: >-
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || inputs.confirm_deploy == 'yes')
+      inputs.confirm_deploy == 'yes'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:

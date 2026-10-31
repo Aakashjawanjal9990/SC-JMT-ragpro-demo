@@ -1,9 +1,11 @@
 # Cloud Run deployment setup
 
-The GitHub Actions deployment workflow runs its reusable CI workflow first. It
-deploys only from `main`; pull requests never receive GCP credentials. A push to
-`main` deploys automatically after CI succeeds. `workflow_dispatch` is also
-available from `main` and requires `confirm_deploy=yes`.
+The GitHub Actions deployment workflow runs its reusable CI workflow first.
+Pull requests never receive GCP credentials. During the initial production
+deployment, CD is available only through `workflow_dispatch` on `main` and
+requires `confirm_deploy=yes`. The push trigger is intentionally disabled until
+the initial deployment has been approved and verified. After that verification,
+the `main` push trigger can be restored for future approved changes.
 
 ## GitHub Actions variables
 
@@ -46,9 +48,13 @@ The API service `supreme-court-rag-api` is private. The BFF service
 `supreme-court-rag-bff` is publicly invokable as required by the documented
 browser proxy design. The workflow builds the API from `backend/` and BFF from
 `backend/bff/`, and tags both images with the commit SHA in
-`asia-south1-docker.pkg.dev/sc-judgments-rag/scj-cicd-repo`. It does not deploy
-the frontend: the repository documents frontend static hosting separately,
-with same-origin `/api` requests proxied to the BFF.
+`asia-south1-docker.pkg.dev/sc-judgments-rag/scj-cicd-repo`. It does not yet
+deploy the frontend. The frontend Dockerfile requires the actual BFF HTTPS
+origin at build time, and the API requires the exact browser frontend origin
+for CORS. Neither a frontend Cloud Run service nor a production origin is
+currently configured in the inspected project. Do not replace these values
+with placeholders. Add the frontend service after its actual service name and
+origin are established, then validate the API CORS and BFF proxy path together.
 
 Protect `main` with required CI checks and review before changes can merge. A
 successful workflow file review does not verify GCP resources or constitute a
