@@ -1,7 +1,26 @@
-.venv/
+# Python caches, environments, and test output
 __pycache__/
-.pytest_cache/
 *.py[cod]
-.env
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
 coverage*.xml
+htmlcov/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# JavaScript dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,4 +1,0 @@
--r runtime.in
-pytest
-httpx
-pytest-cov

@@ -1,85 +1,56 @@
-# Continuous Deployment Setup Guide
+# Cloud Run deployment setup
 
-## 1. Overview
+The GitHub Actions deployment workflow runs its reusable CI workflow first. It
+deploys only from `main`; pull requests never receive GCP credentials. A push to
+`main` deploys automatically after CI succeeds. `workflow_dispatch` is also
+available from `main` and requires `confirm_deploy=yes`.
 
-The CD pipeline deploys the application to Google Cloud Run using GitHub Actions.
+## GitHub Actions variables
 
-Deployment flow:
+Add these as repository Actions variables. Use the existing project and
+Workload Identity Federation configuration and supply the actual runtime
+service accounts, connector, frontend origin, and SMTP settings for this
+environment.
 
-GitHub Actions → Docker Build → Google Artifact Registry → Google Cloud Run → Health Verification
+| Variable | Value or source |
+| --- | --- |
+| `GCP_PROJECT_ID` | `sc-judgments-rag` |
+| `GCP_REGION` | `asia-south1` |
+| `ARTIFACT_REGISTRY_REPOSITORY` | `scj-cicd-repo` |
+| `GCP_WIF_PROVIDER` | `projects/315039048199/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider` |
+| `GCP_WIF_SERVICE_ACCOUNT` | `github-cloudrun-deployer@sc-judgments-rag.iam.gserviceaccount.com` |
+| `CLOUD_RUN_API_SERVICE_ACCOUNT` | Existing least-privilege API runtime service account email |
+| `CLOUD_RUN_BFF_SERVICE_ACCOUNT` | Existing BFF runtime service account email |
+| `CLOUD_RUN_VPC_CONNECTOR` | Existing Serverless VPC Access connector name |
+| `FRONTEND_ORIGIN` | Actual HTTPS origin of the current frontend host, without a path |
+| `SMTP_HOST` | Approved production SMTP host |
+| `SMTP_FROM_EMAIL` | Verified sender address for that SMTP service |
 
-Deployment is initially triggered manually. No automatic production deployment is configured.
+Do not put secret values in Actions variables. The workflow references these
+existing Secret Manager secret IDs for the API: `backend-database-url`,
+`backend-redis-url`, `backend-auth-challenge-secret`, `backend-groq-api-key`,
+`backend-smtp-username`, and `backend-smtp-password`. Confirm that they exist
+and that the API runtime service account can access them before enabling CD.
 
-## 2. GitHub Repository Variables
+## Existing permissions and service wiring
 
-Navigate to:
+The deployment service account must already have the documented Artifact
+Registry Writer, Cloud Run Admin, and Service Account User permissions, plus
+the configured Workload Identity User binding. The BFF runtime service account
+must already be allowed to invoke the private API. The API runtime service
+account must already have access to the required secrets and private network
+dependencies. This workflow does not create IAM bindings, secrets, or network
+resources.
 
-GitHub Repository → Settings → Secrets and variables → Actions → Variables
+The API service `supreme-court-rag-api` is private. The BFF service
+`supreme-court-rag-bff` is publicly invokable as required by the documented
+browser proxy design. The workflow builds the API from `backend/` and BFF from
+`backend/bff/`, and tags both images with the commit SHA in
+`asia-south1-docker.pkg.dev/sc-judgments-rag/scj-cicd-repo`. It does not deploy
+the frontend: the repository documents frontend static hosting separately,
+with same-origin `/api` requests proxied to the BFF.
 
-Configure the following variables after the corresponding GCP resources have been created.
-
-| Variable | Description |
-|---|---|
-| `GCP_PROJECT_ID` | GCP project ID selected for deployment |
-| `GCP_REGION` | Region used for Artifact Registry and Cloud Run |
-| `ARTIFACT_REGISTRY_REPOSITORY` | Name of the Docker repository in Artifact Registry |
-| `CLOUD_RUN_SERVICE` | Cloud Run service name |
-| `GCP_WIF_PROVIDER` | Full Workload Identity Federation provider resource name |
-| `GCP_WIF_SERVICE_ACCOUNT` | Email address of the deployment service account |
-
-Do not insert placeholder values into production configuration and assume they are valid.
-
-## 3. Google Cloud Prerequisites
-
-Before enabling deployment, configure the following:
-
-1. Select the intended GCP project.
-2. Enable the required Google Cloud APIs.
-3. Create a Docker repository in Artifact Registry.
-4. Configure Workload Identity Federation for GitHub Actions.
-5. Restrict federation to the intended GitHub repository and deployment context.
-6. Create a dedicated deployment service account.
-7. Grant the minimum IAM permissions needed to publish images and deploy Cloud Run services.
-8. Configure the Cloud Run runtime service account and required application permissions.
-
-Do not use a permanent service-account private key in GitHub Actions.
-
-## 4. Deployment Security
-
-- Keep deployment separate from the CI workflow.
-- Require an explicit deployment confirmation.
-- Use immutable Git commit SHA tags for container images.
-- Do not enable unauthenticated Cloud Run access unless explicitly required and approved.
-- Do not store credentials or private keys in the repository.
-- Pin third-party GitHub Actions to verified full commit SHAs before production use.
-- Review IAM permissions before the first deployment.
-
-## 5. Post-Deployment Verification
-
-After deployment, verify:
-
-- Cloud Run reports the intended revision as ready.
-- The deployed container starts successfully.
-- The application health endpoint returns the expected response.
-- Application logs do not show startup or configuration errors.
-- Required application integrations are accessible.
-
-The health endpoint must be tested using an access method appropriate to the service's authentication configuration.
-
-## 6. Rollback
-
-Container images should be tagged with their Git commit SHA so that previous releases can be identified.
-
-Before enabling automated rollback:
-
-1. Define how a failed deployment is detected.
-2. Identify the last known-good Cloud Run revision.
-3. Define who can approve or initiate rollback.
-4. Test rollback in a non-production environment.
-5. Document how to verify service recovery.
-
-## 7. Current Limitations
-
-The workflow is a draft until the GitHub variables, GCP identity, IAM permissions, and target resources are configured.
-
-A successful deployment must not be assumed until the deployed revision and application health have been verified.
+Protect `main` with required CI checks and review before changes can merge. A
+successful workflow file review does not verify GCP resources or constitute a
+deployment; the first deployment must be reviewed in GitHub Actions and
+verified against the Cloud Run revisions and health checks.

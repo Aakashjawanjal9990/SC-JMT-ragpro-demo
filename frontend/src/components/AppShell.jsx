@@ -1,0 +1,243 @@
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  Archive,
+  Check,
+  LogOut,
+  Menu,
+  MessageSquare,
+  Pin,
+  PinOff,
+  Plus,
+  Search,
+  Share2,
+} from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import useSidebarPrefs from '../hooks/useSidebarPrefs';
+import { displayName } from '../lib/names';
+import scales from '../assets/scales.png';
+import Logo from './Logo';
+
+export default function AppShell({
+  className = '',
+  crumb,
+  conversations = [],
+  conversationsStatus = 'ready',
+  conversationsError = '',
+  onRetryConversations,
+  activeId = null,
+  onNew,
+  onSelect,
+  onArchive,
+  onShowArchived,
+  showingArchived = false,
+  children,
+}) {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const prefs = useSidebarPrefs(user.email);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const matches = conversations.filter((c) =>
+    (c.title || '').toLowerCase().includes(query.toLowerCase()),
+  );
+
+  const pinnedList = matches.filter((c) => prefs.pinned.includes(String(c.id)));
+
+  const recentList = matches.filter(
+    (c) => !prefs.pinned.includes(String(c.id)),
+  );
+
+  const share = async () => {
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: 'Nyaya-Mitra',
+          url: location.href,
+        });
+      } else {
+        await navigator.clipboard.writeText(location.href);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1800);
+      }
+    } catch {
+      // The user may dismiss the share sheet.
+    }
+  };
+
+  const signOut = async () => {
+    await logout();
+    navigate('/', { replace: true });
+  };
+
+  const archiveChat = async (c) => {
+    try {
+      await onArchive?.(c.id);
+    } catch (err) {
+      window.alert(err.message);
+    }
+  };
+
+  const renderRow = (c) => {
+    const isPinned = prefs.pinned.includes(String(c.id));
+    const isActive = String(c.id) === String(activeId);
+
+    return (
+      <div key={c.id} className={`sidebar-row ${isActive ? 'active' : ''}`}>
+        <button
+          className="sidelink"
+          onClick={() => {
+            setOpen(false);
+            onSelect?.(c.id);
+          }}
+        >
+          <MessageSquare size={14} />
+          <span className="trunc">{c.title || 'Untitled research'}</span>
+        </button>
+
+        <button
+          className="row-action"
+          aria-label={isPinned ? 'Unpin research' : 'Pin research'}
+          title={isPinned ? 'Unpin' : 'Pin to top'}
+          onClick={() => prefs.togglePin(c.id)}
+        >
+          {isPinned ? <PinOff size={13} /> : <Pin size={13} />}
+        </button>
+
+        <button
+          className="row-action"
+          aria-label="Archive research"
+          title="Archive"
+          onClick={() => archiveChat(c)}
+        >
+          <Archive size={13} />
+        </button>
+      </div>
+    );
+  };
+
+  return (
+    <div className={`shell ${className}`.trim()}>
+      <div className="shell-brand">
+        <button
+          className="icon-btn menu"
+          aria-label="Open menu"
+          onClick={() => setOpen(true)}
+        >
+          <Menu size={20} />
+        </button>
+        <Logo to="/home" />
+      </div>
+
+      <header className="shell-top">
+        <span className="crumb">
+          Supreme Court research / <b>{crumb}</b>
+        </span>
+
+        <div className="row">
+          <button className="ghost" onClick={share}>
+            {copied ? <Check size={15} /> : <Share2 size={15} />}
+            {copied ? 'Page link copied' : 'Share page'}
+          </button>
+
+          <div className="userchip" title={user.email}>
+            <span className="avatar">{displayName(user)[0].toUpperCase()}</span>
+            <span className="uname">{displayName(user)}</span>
+          </div>
+
+          <button className="ghost" onClick={signOut}>
+            <LogOut size={15} />
+            Logout
+          </button>
+        </div>
+      </header>
+
+      {open && <div className="scrim" onClick={() => setOpen(false)} />}
+
+      <aside className={`sidebar ${open ? 'open' : ''}`}>
+        <button
+          className="newbtn"
+          onClick={() => {
+            setOpen(false);
+            onNew?.();
+          }}
+        >
+          <Plus size={16} /> New Research
+        </button>
+
+        {searching ? (
+          <input
+            className="sidesearch-input"
+            autoFocus
+            placeholder="Search research"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onBlur={() => !query && setSearching(false)}
+          />
+        ) : (
+          <button className="sidelink" onClick={() => setSearching(true)}>
+            <Search size={14} /> Search research
+          </button>
+        )}
+
+        {conversationsStatus === 'ready' && pinnedList.length > 0 && (
+          <>
+            <h4>PINNED</h4>
+            {pinnedList.map(renderRow)}
+          </>
+        )}
+
+        <h4>YOUR RESEARCH</h4>
+
+        {conversationsStatus === 'loading' && (
+          <p className="sidehint" aria-live="polite">
+            Loading research…
+          </p>
+        )}
+
+        {conversationsStatus === 'error' && (
+          <div className="sidehint" role="alert">
+            <p>{conversationsError || 'Could not load your research.'}</p>
+            <button className="linkbtn" onClick={onRetryConversations}>
+              Try again
+            </button>
+          </div>
+        )}
+
+        {conversationsStatus === 'ready' && matches.length === 0 && (
+          <p className="sidehint">
+            {conversations.length
+              ? 'No matching research.'
+              : 'Start a conversation and revisit your research here.'}
+          </p>
+        )}
+
+        {conversationsStatus === 'ready' && recentList.map(renderRow)}
+
+        <div className="sidefoot">
+          <button
+            className={`sidelink ${showingArchived ? 'active' : ''}`}
+            onClick={() => {
+              setOpen(false);
+              onShowArchived?.();
+            }}
+          >
+            <Archive size={14} /> Archived chats
+          </button>
+        </div>
+      </aside>
+
+      <main className="shell-main">
+        <img className="watermark" src={scales} alt="" />
+        <div className="shell-content">{children}</div>
+        <p className="foot">
+          Research assistance, not legal advice. Always check the original
+          judgment.
+        </p>
+      </main>
+    </div>
+  );
+}

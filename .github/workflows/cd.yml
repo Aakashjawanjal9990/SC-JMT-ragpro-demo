@@ -1,175 +1,207 @@
-name: CD - Deploy to Cloud Run
+name: CD - Deploy API and BFF to Cloud Run
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       confirm_deploy:
-        description: "Select yes only when you are ready to deploy"
+        description: "Confirm deployment from main"
         required: true
         type: choice
-        options:
-          - "no"
-          - "yes"
+        options: ["no", "yes"]
         default: "no"
 
 permissions:
   contents: read
 
 concurrency:
-  group: cloud-run-deployment
+  group: cloud-run-production
   cancel-in-progress: false
 
 jobs:
   ci:
-    name: Run CI Tests
-    if: inputs.confirm_deploy == 'yes' && github.ref == 'refs/heads/main'
+    name: Require repository CI
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || inputs.confirm_deploy == 'yes')
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
 
   deploy:
-    name: Build, Push, and Deploy
+    name: Build, push, and deploy API and BFF
     needs: ci
-    if: inputs.confirm_deploy == 'yes' && github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || inputs.confirm_deploy == 'yes')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 40
     permissions:
       contents: read
       id-token: write
-
     env:
       PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       REGION: ${{ vars.GCP_REGION }}
       AR_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPOSITORY }}
-      SERVICE_NAME: ${{ vars.CLOUD_RUN_SERVICE }}
-
+      WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+      WIF_SERVICE_ACCOUNT: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+      API_RUNTIME_SERVICE_ACCOUNT: ${{ vars.CLOUD_RUN_API_SERVICE_ACCOUNT }}
+      BFF_RUNTIME_SERVICE_ACCOUNT: ${{ vars.CLOUD_RUN_BFF_SERVICE_ACCOUNT }}
+      VPC_CONNECTOR: ${{ vars.CLOUD_RUN_VPC_CONNECTOR }}
+      FRONTEND_ORIGIN: ${{ vars.FRONTEND_ORIGIN }}
+      SMTP_HOST: ${{ vars.SMTP_HOST }}
+      SMTP_FROM_EMAIL: ${{ vars.SMTP_FROM_EMAIL }}
+      API_SERVICE: supreme-court-rag-api
+      BFF_SERVICE: supreme-court-rag-bff
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Validate Deployment Configuration
+      - name: Validate deployment configuration
         shell: bash
-        env:
-          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-          GCP_REGION: ${{ vars.GCP_REGION }}
-          ARTIFACT_REGISTRY_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPOSITORY }}
-          CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
-          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
-          GCP_WIF_SERVICE_ACCOUNT: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
         run: |
           set -euo pipefail
-
-          for name in \
-            GCP_PROJECT_ID \
-            GCP_REGION \
-            ARTIFACT_REGISTRY_REPOSITORY \
-            CLOUD_RUN_SERVICE \
-            GCP_WIF_PROVIDER \
-            GCP_WIF_SERVICE_ACCOUNT
-          do
+          for name in PROJECT_ID REGION AR_REPOSITORY WIF_PROVIDER WIF_SERVICE_ACCOUNT \
+            API_RUNTIME_SERVICE_ACCOUNT BFF_RUNTIME_SERVICE_ACCOUNT VPC_CONNECTOR \
+            FRONTEND_ORIGIN SMTP_HOST SMTP_FROM_EMAIL; do
             if [[ -z "${!name:-}" ]]; then
-              echo "::error::Required GitHub variable is missing: $name"
+              echo "::error::Required GitHub Actions variable is missing: $name"
               exit 1
             fi
           done
+          [[ "$PROJECT_ID" == "sc-judgments-rag" ]]
+          [[ "$REGION" == "asia-south1" ]]
+          [[ "$AR_REPOSITORY" == "scj-cicd-repo" ]]
+          [[ "$WIF_PROVIDER" == "projects/315039048199/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider" ]]
+          [[ "$WIF_SERVICE_ACCOUNT" == "github-cloudrun-deployer@sc-judgments-rag.iam.gserviceaccount.com" ]]
+          [[ "$API_RUNTIME_SERVICE_ACCOUNT" == *@sc-judgments-rag.iam.gserviceaccount.com ]]
+          [[ "$BFF_RUNTIME_SERVICE_ACCOUNT" == *@sc-judgments-rag.iam.gserviceaccount.com ]]
+          [[ "$FRONTEND_ORIGIN" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$ ]]
+          [[ "$VPC_CONNECTOR" != *replace-with* ]]
+          [[ "$API_RUNTIME_SERVICE_ACCOUNT" != *replace-with* ]]
+          [[ "$BFF_RUNTIME_SERVICE_ACCOUNT" != *replace-with* ]]
+          [[ "$SMTP_HOST" != *replace-with* ]]
+          [[ "$SMTP_FROM_EMAIL" != *replace-with* ]]
+          echo "Deployment configuration values are present."
 
-          echo "Required deployment configuration is present."
-
-      - name: Authenticate to Google Cloud
+      - name: Authenticate to Google Cloud with Workload Identity Federation
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
 
-      - name: Set Up Google Cloud CLI
+      - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
-      - name: Configure Docker Authentication
+      - name: Configure Artifact Registry authentication
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and push immutable images
+        id: images
         shell: bash
         run: |
           set -euo pipefail
+          registry="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}"
+          api_image="${registry}/backend:${GITHUB_SHA}"
+          bff_image="${registry}/bff:${GITHUB_SHA}"
+          docker build --pull -f backend/Dockerfile -t "$api_image" backend/
+          docker build --pull -f backend/bff/Dockerfile -t "$bff_image" backend/bff/
+          docker push "$api_image"
+          docker push "$bff_image"
+          echo "api_image=$api_image" >> "$GITHUB_OUTPUT"
+          echo "bff_image=$bff_image" >> "$GITHUB_OUTPUT"
 
-          gcloud auth configure-docker \
-            "${REGION}-docker.pkg.dev" \
-            --quiet
-
-      - name: Build Docker Image
+      - name: Deploy private backend API
         shell: bash
+        env:
+          API_IMAGE: ${{ steps.images.outputs.api_image }}
         run: |
           set -euo pipefail
-
-          IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/${SERVICE_NAME}:${GITHUB_SHA}"
-
-          docker build --pull -t "${IMAGE_URI}" .
-
-          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
-
-      - name: Push Image to Artifact Registry
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker push "${IMAGE_URI}"
-
-      - name: Deploy to Cloud Run
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          gcloud run deploy "${SERVICE_NAME}" \
-            --image="${IMAGE_URI}" \
-            --project="${PROJECT_ID}" \
-            --region="${REGION}" \
+          gcloud run deploy "$API_SERVICE" \
+            --image="$API_IMAGE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
             --platform=managed \
+            --no-allow-unauthenticated \
+            --service-account="$API_RUNTIME_SERVICE_ACCOUNT" \
+            --vpc-connector="$VPC_CONNECTOR" \
+            --vpc-egress=private-ranges-only \
             --port=8080 \
+            --set-env-vars="APP_ENV=production,CORS_ORIGINS=${FRONTEND_ORIGIN},SESSION_COOKIE_NAME=__Host-nm_session,ADMIN_SESSION_COOKIE_NAME=__Host-nm_admin_session,SESSION_COOKIE_SAMESITE=none,SMTP_HOST=${SMTP_HOST},SMTP_PORT=587,SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL},SMTP_STARTTLS=true,RETRIEVAL_PORT_ADAPTER_ENABLED=false" \
+            --set-secrets="DATABASE_URL=backend-database-url:latest,REDIS_URL=backend-redis-url:latest,AUTH_CHALLENGE_SECRET=backend-auth-challenge-secret:latest,GROQ_API_KEY=backend-groq-api-key:latest,SMTP_USERNAME=backend-smtp-username:latest,SMTP_PASSWORD=backend-smtp-password:latest" \
+            --concurrency=40 \
+            --cpu=1 \
+            --memory=1Gi \
+            --max-instances=5 \
+            --min-instances=0 \
+            --timeout=120s \
             --quiet
 
-      - name: Verify Cloud Run Deployment
-        id: verify
+      - name: Read backend service URL
+        id: backend
+        run: |
+          set -euo pipefail
+          url="$(gcloud run services describe "$API_SERVICE" --project="$PROJECT_ID" \
+            --region="$REGION" --format='value(status.url)')"
+          if [[ "$url" != https://*.run.app ]]; then
+            echo "::error::Backend service URL was not a valid Cloud Run HTTPS origin."
+            exit 1
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Check private backend health
+        shell: bash
+        env:
+          BACKEND_URL: ${{ steps.backend.outputs.url }}
+        run: |
+          set -euo pipefail
+          token="$(gcloud auth print-identity-token --audiences="$BACKEND_URL")"
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --max-time 30 --header "Authorization: Bearer ${token}" \
+            "${BACKEND_URL}/health")"
+          if [[ "$status" != "200" ]]; then
+            echo "::error::Private backend health check returned HTTP ${status}."
+            exit 1
+          fi
+
+      - name: Deploy public BFF
+        shell: bash
+        env:
+          BFF_IMAGE: ${{ steps.images.outputs.bff_image }}
+          BACKEND_URL: ${{ steps.backend.outputs.url }}
+        run: |
+          set -euo pipefail
+          gcloud run deploy "$BFF_SERVICE" \
+            --image="$BFF_IMAGE" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --service-account="$BFF_RUNTIME_SERVICE_ACCOUNT" \
+            --set-env-vars="BACKEND_URL=${BACKEND_URL}" \
+            --port=8080 \
+            --concurrency=80 \
+            --cpu=1 \
+            --memory=512Mi \
+            --max-instances=10 \
+            --min-instances=0 \
+            --timeout=120s \
+            --quiet
+
+      - name: Check public BFF health
         shell: bash
         run: |
           set -euo pipefail
-
-          SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" \
-            --project="${PROJECT_ID}" \
-            --region="${REGION}" \
-            --format="value(status.url)")"
-
-          if [[ -z "${SERVICE_URL}" ]]; then
-            echo "::error::Cloud Run did not return a service URL."
+          url="$(gcloud run services describe "$BFF_SERVICE" --project="$PROJECT_ID" \
+            --region="$REGION" --format='value(status.url)')"
+          if [[ "$url" != https://*.run.app ]]; then
+            echo "::error::BFF service URL was not a valid Cloud Run HTTPS origin."
             exit 1
           fi
-
-          echo "SERVICE_URL=${SERVICE_URL}" >> "$GITHUB_ENV"
-          echo "Cloud Run service URL retrieved successfully."
-
-      - name: Run Authenticated Health Check
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ID_TOKEN="$(gcloud auth print-identity-token \
-            --audiences="${SERVICE_URL}")"
-
-          if [[ -z "${ID_TOKEN}" ]]; then
-            echo "::error::Failed to obtain an identity token."
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --max-time 30 "${url}/healthz")"
+          if [[ "$status" != "200" ]]; then
+            echo "::error::Public BFF health check returned HTTP ${status}."
             exit 1
           fi
-
-          HTTP_STATUS="$(curl \
-            --silent \
-            --show-error \
-            --output /tmp/health-response.json \
-            --write-out "%{http_code}" \
-            --max-time 30 \
-            --header "Authorization: Bearer ${ID_TOKEN}" \
-            "${SERVICE_URL}/health")"
-
-          if [[ "${HTTP_STATUS}" != "200" ]]; then
-            echo "::error::Health check failed with HTTP status ${HTTP_STATUS}."
-            cat /tmp/health-response.json
-            exit 1
-          fi
-
-          cat /tmp/health-response.json
-          echo "Cloud Run health check passed."
